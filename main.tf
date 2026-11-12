@@ -17,48 +17,61 @@ data "github_repository" "repository" {
   name = var.repository
 }
 
+# The owner's numeric id, for immutable subject claims (github_organization needs more token scopes)
+data "github_rest_api" "owner" {
+  endpoint = "orgs/${split("/", data.github_repository.repository.full_name)[0]}"
+}
+
 data "aws_secretsmanager_secret_version" "dispatch_app" {
+  count     = local.manage_shared ? 1 : 0
   secret_id = var.dispatch_app_secret_id
 }
 
 locals {
   environment    = coalesce(var.environment, terraform.workspace)
+  manage_shared  = coalesce(var.manage_shared, local.environment == "staging")
+  suffix         = upper(local.environment)
+  branch         = data.github_repository.repository.default_branch
   ecr_repository = regex("repository/(.+)$", var.ecr_repository_arn)[0]
-  dispatch_app   = jsondecode(data.aws_secretsmanager_secret_version.dispatch_app.secret_string)
   push_and_pull  = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart"]
   pull           = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer"]
+
+  # The subject of a token from the workflow file on the default branch, with the repository's
+  # claim template (below). Repositories with immutable subject claims name the owner and
+  # repository with their ids
+  owner = split("/", data.github_repository.repository.full_name)[0]
+  workflow_ref = join("", [
+    ":ref:refs/heads/${local.branch}",
+    ":job_workflow_ref:${data.github_repository.repository.full_name}/.github/workflows/${var.workflow}@refs/heads/${local.branch}",
+  ])
+  subjects = [
+    "repo:${data.github_repository.repository.full_name}${local.workflow_ref}",
+    "repo:${local.owner}@${jsondecode(data.github_rest_api.owner.body).id}/${var.repository}@${data.github_repository.repository.repo_id}${local.workflow_ref}",
+  ]
 }
 
 //
-//  The GitHub environment, deployable from the default branch only
+//  Settings the repository's environments share, managed by one of them: the OIDC claim
+//  template, the dispatch App's key, and the variables every environment uses
 //
-resource "github_repository_environment" "environment" {
-  repository  = var.repository
-  environment = local.environment
-
-  dynamic "reviewers" {
-    for_each = var.reviewers == null ? [] : [var.reviewers]
-    content {
-      teams = reviewers.value.teams
-      users = reviewers.value.users
-    }
-  }
-
-  deployment_branch_policy {
-    protected_branches     = false
-    custom_branch_policies = true
-  }
+resource "github_actions_repository_oidc_subject_claim_customization_template" "repository" {
+  count              = local.manage_shared ? 1 : 0
+  repository         = var.repository
+  use_default        = false
+  include_claim_keys = ["repo", "context", "job_workflow_ref"]
 }
 
-resource "github_repository_environment_deployment_policy" "default_branch" {
-  repository     = var.repository
-  environment    = github_repository_environment.environment.environment
-  branch_pattern = data.github_repository.repository.default_branch
+resource "github_actions_secret" "dispatch_app_private_key" {
+  count           = local.manage_shared ? 1 : 0
+  repository      = var.repository
+  secret_name     = "DISPATCH_APP_PRIVATE_KEY"
+  plaintext_value = jsondecode(data.aws_secretsmanager_secret_version.dispatch_app[0].secret_string).private_key
 }
 
 //
-//  The role the environment's workflows assume: push to this environment's
-//  repository, and pull from the one it promotes from
+//  The role the environment's workflow assumes: push to this environment's
+//  repository, and pull from the one it promotes from. Only the workflow file
+//  on the default branch can assume it
 //
 data "aws_iam_policy_document" "trust" {
   statement {
@@ -75,7 +88,7 @@ data "aws_iam_policy_document" "trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${data.github_repository.repository.full_name}:environment:${local.environment}"]
+      values   = local.subjects
     }
   }
 }
@@ -115,30 +128,28 @@ resource "aws_iam_role_policy" "deploy" {
 }
 
 //
-//  What the environment's workflows need to push images and start a deploy
+//  What the workflows need to push images and start a deploy. Each
+//  environment's variables carry its name as a suffix, such as
+//  AWS_ROLE_ARN_STAGING
 //
 locals {
-  variables = {
-    AWS_ROLE_ARN    = aws_iam_role.deploy.arn
-    AWS_REGION      = data.aws_region.current.region
-    ECR_REPOSITORY  = local.ecr_repository
-    TERRAFORM_PATH  = var.terraform_path
-    DISPATCH_APP_ID = tostring(local.dispatch_app.app_id)
-  }
+  variables = merge(
+    {
+      "AWS_ROLE_ARN_${local.suffix}"   = aws_iam_role.deploy.arn
+      "ECR_REPOSITORY_${local.suffix}" = local.ecr_repository
+    },
+    local.manage_shared ? {
+      AWS_REGION      = data.aws_region.current.region
+      TERRAFORM_PATH  = var.terraform_path
+      DISPATCH_APP_ID = tostring(jsondecode(data.aws_secretsmanager_secret_version.dispatch_app[0].secret_string).app_id)
+    } : {}
+  )
 }
 
-resource "github_actions_environment_variable" "variables" {
+resource "github_actions_variable" "variables" {
   for_each = local.variables
 
   repository    = var.repository
-  environment   = github_repository_environment.environment.environment
   variable_name = each.key
   value         = each.value
-}
-
-resource "github_actions_environment_secret" "dispatch_app_private_key" {
-  repository      = var.repository
-  environment     = github_repository_environment.environment.environment
-  secret_name     = "DISPATCH_APP_PRIVATE_KEY"
-  plaintext_value = local.dispatch_app.private_key
 }
