@@ -11,7 +11,13 @@ variable "environment" {
 
 variable "workflow" {
   type        = string
-  description = "File name of the workflow that deploys the environment, such as deploy.yaml. Only it, on the default branch, can assume the role"
+  description = "File name of the workflow that deploys the environment, such as deploy.yaml. Only it, on the branches in branches, can assume the role"
+}
+
+variable "branches" {
+  type        = list(string)
+  default     = null
+  description = "Branches whose workflow file can assume the role, as IAM StringLike patterns. Defaults to [\"*\"] for staging, so any branch can deploy it, and the default branch otherwise"
 }
 
 variable "manage_shared" {
