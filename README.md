@@ -5,8 +5,9 @@ environments, so it works on any GitHub plan.
 
 In AWS, it creates the role `github-<repository><name_suffix>`. It can push to and pull from
 `ecr_repository_arn`, and pull from `promote_from_repository_arn`. It trusts one workflow file
-(`workflow`) on the repository's default branch, through the account's GitHub Actions OIDC
-provider, so a workflow on another branch, or another workflow file, can't assume it.
+(`workflow`), through the account's GitHub Actions OIDC provider, so another workflow file can't
+assume it. In `staging` that file can run from any branch; in other environments only from the
+default branch (`branches`).
 
 In the repository, it creates Actions variables, with the environment's name as a suffix on those
 that differ per environment:
@@ -52,7 +53,8 @@ owner and itself with their ids (`repo:owner@123/name@456:...`), and an older on
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `repository` | `string` | required | GitHub repository name, in the provider's owner |
-| `workflow` | `string` | required | File name of the workflow that deploys the environment, such as `deploy.yaml`. Only it, on the default branch, can assume the role |
+| `workflow` | `string` | required | File name of the workflow that deploys the environment, such as `deploy.yaml`. Only it, on the branches in `branches`, can assume the role |
+| `branches` | `list(string)` | `null` | Branches whose workflow file can assume the role, as IAM `StringLike` patterns. Defaults to `["*"]` in `staging`, and the default branch otherwise |
 | `environment` | `string` | `null` | Environment name, the suffix of its variables. Defaults to the Terraform workspace |
 | `manage_shared` | `bool` | `null` | Manage the settings the repository's environments share. Defaults to `true` in the `staging` workspace only |
 | `name_suffix` | `string` | `""` | Suffix for the role name, such as the tagging module's `environment_suffix` |
