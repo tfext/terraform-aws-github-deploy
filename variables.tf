@@ -54,8 +54,8 @@ variable "oidc_provider_arn" {
   description = "ARN of the account's GitHub Actions OIDC provider"
 }
 
-variable "dispatch_app_secret_id" {
+variable "dispatch_app_parameter" {
   type        = string
   default     = null
-  description = "Secrets Manager secret holding the dispatch GitHub App, as {\"app_id\": ..., \"private_key\": ...}. Read only when manage_shared"
+  description = "SSM SecureString parameter holding the dispatch GitHub App, as {\"app_id\": ..., \"private_key\": ...}. Read only when manage_shared"
 }

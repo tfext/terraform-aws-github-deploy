@@ -22,9 +22,10 @@ data "github_rest_api" "owner" {
   endpoint = "orgs/${split("/", data.github_repository.repository.full_name)[0]}"
 }
 
-data "aws_secretsmanager_secret_version" "dispatch_app" {
-  count     = local.manage_shared ? 1 : 0
-  secret_id = var.dispatch_app_secret_id
+data "aws_ssm_parameter" "dispatch_app" {
+  count           = local.manage_shared ? 1 : 0
+  name            = var.dispatch_app_parameter
+  with_decryption = true
 }
 
 locals {
@@ -67,7 +68,7 @@ resource "github_actions_secret" "dispatch_app_private_key" {
   count           = local.manage_shared ? 1 : 0
   repository      = var.repository
   secret_name     = "DISPATCH_APP_PRIVATE_KEY"
-  plaintext_value = jsondecode(data.aws_secretsmanager_secret_version.dispatch_app[0].secret_string).private_key
+  plaintext_value = jsondecode(data.aws_ssm_parameter.dispatch_app[0].value).private_key
 }
 
 //
@@ -143,7 +144,7 @@ locals {
     local.manage_shared ? {
       AWS_REGION      = data.aws_region.current.region
       TERRAFORM_PATH  = var.terraform_path
-      DISPATCH_APP_ID = tostring(jsondecode(data.aws_secretsmanager_secret_version.dispatch_app[0].secret_string).app_id)
+      DISPATCH_APP_ID = tostring(jsondecode(data.aws_ssm_parameter.dispatch_app[0].value).app_id)
     } : {}
   )
 }

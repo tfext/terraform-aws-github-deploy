@@ -21,7 +21,7 @@ that differ per environment:
 The environment that manages the shared settings (`manage_shared`, the `staging` workspace by
 default) also creates:
 
-- The Actions secret `DISPATCH_APP_PRIVATE_KEY`, read from Secrets Manager, so workflows can mint
+- The Actions secret `DISPATCH_APP_PRIVATE_KEY`, read from an SSM SecureString parameter, so workflows can mint
   a GitHub App token and dispatch the Terraform Apply workflow. It's stored in Terraform's state.
 - The repository's OIDC subject claim template, `repo`, `context` and `job_workflow_ref`, which
   puts the workflow file in the token's subject for the roles to trust.
@@ -41,7 +41,7 @@ module "github_deploy" {
   promote_from_repository_arn = module.tagging.production ? local.staging_ecr_arn : null
   terraform_path              = "apps/propraize"
   oidc_provider_arn           = local.github_oidc_provider_arn
-  dispatch_app_secret_id      = "ppta/github-dispatch-app"
+  dispatch_app_parameter      = "/ppta/github-dispatch-app"
 }
 ```
 
@@ -62,7 +62,7 @@ owner and itself with their ids (`repo:owner@123/name@456:...`), and an older on
 | `promote_from_repository_arn` | `string` | `null` | ECR repository the workflow can pull from, to promote its images |
 | `terraform_path` | `string` | required | Terraform unit that deploys the application, passed to the Apply workflow |
 | `oidc_provider_arn` | `string` | required | The account's GitHub Actions OIDC provider |
-| `dispatch_app_secret_id` | `string` | `null` | Secrets Manager secret holding the dispatch GitHub App, as `{"app_id": ..., "private_key": ...}`. Read only when managing the shared settings |
+| `dispatch_app_parameter` | `string` | `null` | SSM SecureString parameter holding the dispatch GitHub App, as `{"app_id": ..., "private_key": ...}`. Read only when managing the shared settings |
 
 ## Outputs
 
