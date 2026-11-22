@@ -63,6 +63,7 @@ owner and itself with their ids (`repo:owner@123/name@456:...`), and an older on
 | `terraform_path` | `string` | required | Terraform unit that deploys the application, passed to the Apply workflow |
 | `oidc_provider_arn` | `string` | required | The account's GitHub Actions OIDC provider |
 | `dispatch_app_parameter` | `string` | `null` | SSM SecureString parameter holding the dispatch GitHub App, as `{"app_id": ..., "private_key": ...}`. Read only when managing the shared settings |
+| `run_task` | `object` | `null` | Lets the workflow start one task family on a cluster (`cluster_arn`, `task_family`), pass its roles to ECS (`pass_role_arns`), follow it with `DescribeTasks`, and read the buckets it writes to (`read_bucket_arns`). For one-off tasks such as migrations |
 
 ## Outputs
 

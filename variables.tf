@@ -59,3 +59,14 @@ variable "dispatch_app_parameter" {
   default     = null
   description = "SSM SecureString parameter holding the dispatch GitHub App, as {\"app_id\": ..., \"private_key\": ...}. Read only when manage_shared"
 }
+
+variable "run_task" {
+  type = object({
+    cluster_arn      = string
+    task_family      = string
+    pass_role_arns   = list(string)
+    read_bucket_arns = optional(list(string), [])
+  })
+  default     = null
+  description = "Lets the workflow start one task family on a cluster, wait for it, and read the buckets it writes to"
+}

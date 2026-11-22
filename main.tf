@@ -13,6 +13,8 @@ terraform {
 
 data "aws_region" "current" {}
 
+data "aws_caller_identity" "current" {}
+
 data "github_repository" "repository" {
   name = var.repository
 }
@@ -29,13 +31,15 @@ data "aws_ssm_parameter" "dispatch_app" {
 }
 
 locals {
-  environment    = coalesce(var.environment, terraform.workspace)
-  manage_shared  = coalesce(var.manage_shared, local.environment == "staging")
-  suffix         = upper(local.environment)
-  branches       = coalesce(var.branches, local.environment == "staging" ? ["*"] : [data.github_repository.repository.default_branch])
-  ecr_repository = regex("repository/(.+)$", var.ecr_repository_arn)[0]
-  push_and_pull  = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart"]
-  pull           = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer"]
+  environment      = coalesce(var.environment, terraform.workspace)
+  manage_shared    = coalesce(var.manage_shared, local.environment == "staging")
+  suffix           = upper(local.environment)
+  branches         = coalesce(var.branches, local.environment == "staging" ? ["*"] : [data.github_repository.repository.default_branch])
+  ecr_repository   = regex("repository/(.+)$", var.ecr_repository_arn)[0]
+  account_id       = data.aws_caller_identity.current.account_id
+  run_task_cluster = var.run_task == null ? null : regex("cluster/(.+)$", var.run_task.cluster_arn)[0]
+  push_and_pull    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart"]
+  pull             = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer"]
 
   # The subjects of tokens from the workflow file on each allowed branch, with the repository's
   # claim template (below). Repositories with immutable subject claims name the owner and
@@ -120,6 +124,54 @@ data "aws_iam_policy_document" "deploy" {
       sid       = "PullToPromote"
       actions   = local.pull
       resources = [var.promote_from_repository_arn]
+    }
+  }
+
+  // A one-off task, such as a migration: start one task family on one cluster, follow it to the
+  // end, and read what it wrote
+  dynamic "statement" {
+    for_each = var.run_task == null ? [] : [var.run_task]
+    content {
+      sid       = "RunTask"
+      actions   = ["ecs:RunTask"]
+      resources = ["arn:aws:ecs:${data.aws_region.current.region}:${local.account_id}:task-definition/${statement.value.task_family}:*"]
+      condition {
+        test     = "ArnEquals"
+        variable = "ecs:cluster"
+        values   = [statement.value.cluster_arn]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.run_task == null ? [] : [var.run_task]
+    content {
+      sid       = "FollowTask"
+      actions   = ["ecs:DescribeTasks"]
+      resources = ["arn:aws:ecs:${data.aws_region.current.region}:${local.account_id}:task/${local.run_task_cluster}/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.run_task == null ? [] : [var.run_task]
+    content {
+      sid       = "PassTaskRoles"
+      actions   = ["iam:PassRole"]
+      resources = statement.value.pass_role_arns
+      condition {
+        test     = "StringEquals"
+        variable = "iam:PassedToService"
+        values   = ["ecs-tasks.amazonaws.com"]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.run_task == null || length(var.run_task.read_bucket_arns) == 0 ? [] : [var.run_task]
+    content {
+      sid       = "ReadTaskOutput"
+      actions   = ["s3:ListBucket", "s3:GetObject"]
+      resources = flatten([for arn in statement.value.read_bucket_arns : [arn, "${arn}/*"]])
     }
   }
 }
