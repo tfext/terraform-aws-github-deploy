@@ -4,7 +4,9 @@ Wire one GitHub repository to deploy one environment of an application, without 
 environments, so it works on any GitHub plan.
 
 In AWS, it creates the role `github-<repository><name_suffix>`. It can push to and pull from
-`ecr_repository_arn`, and pull from `promote_from_repository_arn`. It trusts one workflow file
+`ecr_repository_arn`, pull from `promote_from_repository_arn`, run a one-off task (`run_task`),
+and deploy a static site (`static_site`): list the bucket, write and delete under its `app/`
+prefix, and invalidate the distribution. It trusts one workflow file
 (`workflow`), through the account's GitHub Actions OIDC provider, so another workflow file can't
 assume it. In `staging` that file can run from any branch; in other environments only from the
 default branch (`branches`).
@@ -15,14 +17,18 @@ that differ per environment:
 | Variable | Set by |
 |---|---|
 | `AWS_ROLE_ARN_<ENVIRONMENT>`, such as `AWS_ROLE_ARN_STAGING` | Every environment |
-| `ECR_REPOSITORY_<ENVIRONMENT>` | Every environment |
-| `AWS_REGION`, `TERRAFORM_PATH`, `DISPATCH_APP_ID` | The environment that manages the shared settings |
+| `ECR_REPOSITORY_<ENVIRONMENT>` | Every environment with `ecr_repository_arn` |
+| `SITE_BUCKET_<ENVIRONMENT>`, `SITE_DISTRIBUTION_<ENVIRONMENT>` (the distribution's id) | Every environment with `static_site` |
+| `AWS_REGION` | The environment that manages the shared settings |
+| `TERRAFORM_PATH`, `DISPATCH_APP_ID` | The environment that manages the shared settings, with `terraform_path` |
 
 The environment that manages the shared settings (`manage_shared`, the `staging` workspace by
 default) also creates:
 
-- The Actions secret `DISPATCH_APP_PRIVATE_KEY`, read from an SSM SecureString parameter, so workflows can mint
-  a GitHub App token and dispatch the Terraform Apply workflow. It's stored in Terraform's state.
+- With `terraform_path`, the Actions secret `DISPATCH_APP_PRIVATE_KEY`, read from an SSM
+  SecureString parameter, so workflows can mint a GitHub App token and dispatch the Terraform
+  Apply workflow. It's stored in Terraform's state. A workflow that doesn't dispatch the Apply
+  workflow, such as a static site's, leaves `terraform_path` unset.
 - The repository's OIDC subject claim template, `repo`, `context` and `job_workflow_ref`, which
   puts the workflow file in the token's subject for the roles to trust.
 
@@ -45,6 +51,24 @@ module "github_deploy" {
 }
 ```
 
+A static site's workflow, which syncs its build to the bucket and invalidates the distribution
+(the bucket and distribution of
+[terraform-aws-web-app](https://github.com/tfext/terraform-aws-web-app) without `dist_root`):
+
+```hcl
+module "github_deploy_app" {
+  source            = "github.com/tfext/terraform-aws-github-deploy?ref=<tag>"
+  repository        = "propraize-app"
+  workflow          = "deploy-staging.yaml"
+  name_suffix       = module.tagging.environment_suffix
+  oidc_provider_arn = local.github_oidc_provider_arn
+  static_site = {
+    bucket_arn       = "arn:aws:s3:::${module.web_app.bucket}"
+    distribution_arn = module.web_app.distribution_arn
+  }
+}
+```
+
 The role trusts both forms of the subject: a repository with immutable subject claims names its
 owner and itself with their ids (`repo:owner@123/name@456:...`), and an older one by name.
 
@@ -58,12 +82,13 @@ owner and itself with their ids (`repo:owner@123/name@456:...`), and an older on
 | `environment` | `string` | `null` | Environment name, the suffix of its variables. Defaults to the Terraform workspace |
 | `manage_shared` | `bool` | `null` | Manage the settings the repository's environments share. Defaults to `true` in the `staging` workspace only |
 | `name_suffix` | `string` | `""` | Suffix for the role name, such as the tagging module's `environment_suffix` |
-| `ecr_repository_arn` | `string` | required | ECR repository the environment's workflow pushes to |
+| `ecr_repository_arn` | `string` | `null` | ECR repository the environment's workflow pushes to. Unset for a workflow that pushes no image, such as a static site's |
 | `promote_from_repository_arn` | `string` | `null` | ECR repository the workflow can pull from, to promote its images |
-| `terraform_path` | `string` | required | Terraform unit that deploys the application, passed to the Apply workflow |
+| `terraform_path` | `string` | `null` | Terraform unit that deploys the application, passed to the Apply workflow. Unset when the workflow doesn't dispatch the Apply workflow, which leaves out the dispatch App's key, `TERRAFORM_PATH` and `DISPATCH_APP_ID` |
 | `oidc_provider_arn` | `string` | required | The account's GitHub Actions OIDC provider |
-| `dispatch_app_parameter` | `string` | `null` | SSM SecureString parameter holding the dispatch GitHub App, as `{"app_id": ..., "private_key": ...}`. Read only when managing the shared settings |
+| `dispatch_app_parameter` | `string` | `null` | SSM SecureString parameter holding the dispatch GitHub App, as `{"app_id": ..., "private_key": ...}`. Read only when managing the shared settings with `terraform_path` |
 | `run_task` | `object` | `null` | Lets the workflow start one task family on a cluster (`cluster_arn`, `task_family`), pass its roles to ECS (`pass_role_arns`), follow it with `DescribeTasks`, and read the buckets it writes to (`read_bucket_arns`). For one-off tasks such as migrations |
+| `static_site` | `object` | `null` | Lets the workflow sync a built site to the bucket's `app/` prefix (`bucket_arn`) and invalidate the distribution (`distribution_arn`) |
 
 ## Outputs
 

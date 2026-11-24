@@ -25,21 +25,24 @@ data "github_rest_api" "owner" {
 }
 
 data "aws_ssm_parameter" "dispatch_app" {
-  count           = local.manage_shared ? 1 : 0
+  count           = local.dispatch ? 1 : 0
   name            = var.dispatch_app_parameter
   with_decryption = true
 }
 
 locals {
-  environment      = coalesce(var.environment, terraform.workspace)
-  manage_shared    = coalesce(var.manage_shared, local.environment == "staging")
-  suffix           = upper(local.environment)
-  branches         = coalesce(var.branches, local.environment == "staging" ? ["*"] : [data.github_repository.repository.default_branch])
-  ecr_repository   = regex("repository/(.+)$", var.ecr_repository_arn)[0]
-  account_id       = data.aws_caller_identity.current.account_id
-  run_task_cluster = var.run_task == null ? null : regex("cluster/(.+)$", var.run_task.cluster_arn)[0]
-  push_and_pull    = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart"]
-  pull             = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer"]
+  environment       = coalesce(var.environment, terraform.workspace)
+  manage_shared     = coalesce(var.manage_shared, local.environment == "staging")
+  dispatch          = local.manage_shared && var.terraform_path != null
+  suffix            = upper(local.environment)
+  branches          = coalesce(var.branches, local.environment == "staging" ? ["*"] : [data.github_repository.repository.default_branch])
+  ecr_repository    = var.ecr_repository_arn == null ? null : regex("repository/(.+)$", var.ecr_repository_arn)[0]
+  account_id        = data.aws_caller_identity.current.account_id
+  run_task_cluster  = var.run_task == null ? null : regex("cluster/(.+)$", var.run_task.cluster_arn)[0]
+  site_bucket       = var.static_site == null ? null : regex("^arn:aws:s3:::(.+)$", var.static_site.bucket_arn)[0]
+  site_distribution = var.static_site == null ? null : regex("distribution/(.+)$", var.static_site.distribution_arn)[0]
+  push_and_pull     = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:CompleteLayerUpload", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer", "ecr:InitiateLayerUpload", "ecr:PutImage", "ecr:UploadLayerPart"]
+  pull              = ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:DescribeImages", "ecr:GetDownloadUrlForLayer"]
 
   # The subjects of tokens from the workflow file on each allowed branch, with the repository's
   # claim template (below). Repositories with immutable subject claims name the owner and
@@ -59,7 +62,8 @@ locals {
 
 //
 //  Settings the repository's environments share, managed by one of them: the OIDC claim
-//  template, the dispatch App's key, and the variables every environment uses
+//  template, the dispatch App's key (when the workflow dispatches the Apply workflow), and the
+//  variables every environment uses
 //
 resource "github_actions_repository_oidc_subject_claim_customization_template" "repository" {
   count              = local.manage_shared ? 1 : 0
@@ -69,7 +73,7 @@ resource "github_actions_repository_oidc_subject_claim_customization_template" "
 }
 
 resource "github_actions_secret" "dispatch_app_private_key" {
-  count           = local.manage_shared ? 1 : 0
+  count           = local.dispatch ? 1 : 0
   repository      = var.repository
   secret_name     = "DISPATCH_APP_PRIVATE_KEY"
   plaintext_value = jsondecode(data.aws_ssm_parameter.dispatch_app[0].value).private_key
@@ -77,8 +81,8 @@ resource "github_actions_secret" "dispatch_app_private_key" {
 
 //
 //  The role the environment's workflow assumes: push to this environment's
-//  repository, and pull from the one it promotes from. Only the workflow file,
-//  on the allowed branches, can assume it
+//  repository, pull from the one it promotes from, and deploy a static site.
+//  Only the workflow file, on the allowed branches, can assume it
 //
 data "aws_iam_policy_document" "trust" {
   statement {
@@ -106,16 +110,22 @@ resource "aws_iam_role" "deploy" {
 }
 
 data "aws_iam_policy_document" "deploy" {
-  statement {
-    sid       = "EcrSignIn"
-    actions   = ["ecr:GetAuthorizationToken"]
-    resources = ["*"]
+  dynamic "statement" {
+    for_each = var.ecr_repository_arn == null && var.promote_from_repository_arn == null ? [] : [1]
+    content {
+      sid       = "EcrSignIn"
+      actions   = ["ecr:GetAuthorizationToken"]
+      resources = ["*"]
+    }
   }
 
-  statement {
-    sid       = "PushAndPull"
-    actions   = local.push_and_pull
-    resources = [var.ecr_repository_arn]
+  dynamic "statement" {
+    for_each = var.ecr_repository_arn == null ? [] : [1]
+    content {
+      sid       = "PushAndPull"
+      actions   = local.push_and_pull
+      resources = [var.ecr_repository_arn]
+    }
   }
 
   dynamic "statement" {
@@ -174,27 +184,64 @@ data "aws_iam_policy_document" "deploy" {
       resources = flatten([for arn in statement.value.read_bucket_arns : [arn, "${arn}/*"]])
     }
   }
+
+  // A static site: sync the build to the bucket's app/ prefix and invalidate the distribution
+  dynamic "statement" {
+    for_each = var.static_site == null ? [] : [var.static_site]
+    content {
+      sid       = "ListSite"
+      actions   = ["s3:ListBucket"]
+      resources = [statement.value.bucket_arn]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.static_site == null ? [] : [var.static_site]
+    content {
+      sid       = "SyncSite"
+      actions   = ["s3:PutObject", "s3:DeleteObject"]
+      resources = ["${statement.value.bucket_arn}/app/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.static_site == null ? [] : [var.static_site]
+    content {
+      sid       = "InvalidateSite"
+      actions   = ["cloudfront:CreateInvalidation"]
+      resources = [statement.value.distribution_arn]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "deploy" {
   name   = "deploy"
   role   = aws_iam_role.deploy.id
   policy = data.aws_iam_policy_document.deploy.json
+
+  lifecycle {
+    precondition {
+      condition     = var.ecr_repository_arn != null || var.promote_from_repository_arn != null || var.static_site != null || var.run_task != null
+      error_message = "Give the role something to deploy: ecr_repository_arn, static_site or run_task."
+    }
+  }
 }
 
 //
-//  What the workflows need to push images and start a deploy. Each
-//  environment's variables carry its name as a suffix, such as
+//  What the workflows need to push images, deploy a site and start a deploy.
+//  Each environment's variables carry its name as a suffix, such as
 //  AWS_ROLE_ARN_STAGING
 //
 locals {
   variables = merge(
-    {
-      "AWS_ROLE_ARN_${local.suffix}"   = aws_iam_role.deploy.arn
-      "ECR_REPOSITORY_${local.suffix}" = local.ecr_repository
+    { "AWS_ROLE_ARN_${local.suffix}" = aws_iam_role.deploy.arn },
+    var.ecr_repository_arn == null ? {} : { "ECR_REPOSITORY_${local.suffix}" = local.ecr_repository },
+    var.static_site == null ? {} : {
+      "SITE_BUCKET_${local.suffix}"       = local.site_bucket
+      "SITE_DISTRIBUTION_${local.suffix}" = local.site_distribution
     },
-    local.manage_shared ? {
-      AWS_REGION      = data.aws_region.current.region
+    local.manage_shared ? { AWS_REGION = data.aws_region.current.region } : {},
+    local.dispatch ? {
       TERRAFORM_PATH  = var.terraform_path
       DISPATCH_APP_ID = tostring(jsondecode(data.aws_ssm_parameter.dispatch_app[0].value).app_id)
     } : {}

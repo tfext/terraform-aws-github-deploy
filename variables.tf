@@ -23,7 +23,7 @@ variable "branches" {
 variable "manage_shared" {
   type        = bool
   default     = null
-  description = "Manage the settings the repository's environments share: the OIDC claim template, the dispatch App's key, AWS_REGION, TERRAFORM_PATH and DISPATCH_APP_ID. Exactly one environment of a repository manages them. Defaults to true in the staging workspace only"
+  description = "Manage the settings the repository's environments share: the OIDC claim template, AWS_REGION, and with terraform_path the dispatch App's key, TERRAFORM_PATH and DISPATCH_APP_ID. Exactly one environment of a repository manages them. Defaults to true in the staging workspace only"
 }
 
 variable "name_suffix" {
@@ -35,7 +35,8 @@ variable "name_suffix" {
 
 variable "ecr_repository_arn" {
   type        = string
-  description = "ARN of the ECR repository the environment's workflow pushes to"
+  default     = null
+  description = "ARN of the ECR repository the environment's workflow pushes to. Unset for a workflow that pushes no image, such as a static site's"
 }
 
 variable "promote_from_repository_arn" {
@@ -46,7 +47,8 @@ variable "promote_from_repository_arn" {
 
 variable "terraform_path" {
   type        = string
-  description = "Path of the Terraform unit that deploys the application, passed to the Apply workflow"
+  default     = null
+  description = "Path of the Terraform unit that deploys the application, passed to the Apply workflow. Unset when the workflow doesn't dispatch the Apply workflow, which leaves out the dispatch App's key, TERRAFORM_PATH and DISPATCH_APP_ID"
 }
 
 variable "oidc_provider_arn" {
@@ -57,7 +59,7 @@ variable "oidc_provider_arn" {
 variable "dispatch_app_parameter" {
   type        = string
   default     = null
-  description = "SSM SecureString parameter holding the dispatch GitHub App, as {\"app_id\": ..., \"private_key\": ...}. Read only when manage_shared"
+  description = "SSM SecureString parameter holding the dispatch GitHub App, as {\"app_id\": ..., \"private_key\": ...}. Read only when manage_shared and terraform_path is set"
 }
 
 variable "run_task" {
@@ -69,4 +71,13 @@ variable "run_task" {
   })
   default     = null
   description = "Lets the workflow start one task family on a cluster, wait for it, and read the buckets it writes to"
+}
+
+variable "static_site" {
+  type = object({
+    bucket_arn       = string
+    distribution_arn = string
+  })
+  default     = null
+  description = "Lets the workflow sync a built site to the bucket's app/ prefix and invalidate the distribution"
 }
